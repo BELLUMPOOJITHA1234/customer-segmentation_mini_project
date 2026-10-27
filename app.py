@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -10,16 +11,20 @@ st.set_page_config(
 )
 
 st.title("Customer Segmentation")
+st.write("Upload your customer dataset to predict customer segments.")
 
 folder = Path(__file__).resolve().parent
 
-data = pd.read_csv(
-    folder / "customer_segmentation_final.csv"
-)
+# Load your saved model and preprocessing settings.
+model_path = folder / "customer_model.pkl"
 
-bundle = joblib.load(folder / "customer_model.pkl")
+if not model_path.exists():
+    st.error("customer_model.pkl was not found beside app.py.")
+    st.stop()
 
-# Display order only; original model cluster IDs stay unchanged.
+bundle = joblib.load(model_path)
+features = bundle["features"]
+
 segment_order = [
     "Low-Value Customers",
     "Mid-Value Customers",
@@ -33,35 +38,151 @@ display_order = {
 }
 
 
-def predict_segment(customer):
-    """Apply saved preprocessing and predict a segment."""
-    customer = customer[bundle["features"]].copy()
+def predict_segments(customers):
+    """Predict using the saved feature order, limits and scaler."""
+    prepared = customers[features].copy()
 
     for feature, (lower, upper) in bundle["bounds"].items():
-        customer[feature] = customer[feature].clip(
+        prepared[feature] = prepared[feature].clip(
             lower=lower,
             upper=upper
         )
 
-    scaled_customer = pd.DataFrame(
-        bundle["scaler"].transform(customer),
-        columns=bundle["features"]
+    scaled = pd.DataFrame(
+        bundle["scaler"].transform(prepared),
+        columns=features,
+        index=prepared.index
     )
 
-    cluster = int(
-        bundle["model"].predict(scaled_customer)[0]
+    return bundle["model"].predict(scaled)
+
+
+# Dataset upload
+st.subheader("Upload Customer Dataset")
+
+st.info(
+    "Upload prepared numeric customer data. "
+    "Cluster and Customer_Segment columns are not required. "
+    "If present, they will be replaced with fresh predictions."
+)
+
+with st.expander("View required columns and input instructions"):
+    st.write(pd.DataFrame({"Required column": features}))
+
+    st.write(
+        "Use the same units and rate scales as your training dataset."
     )
 
-    return bundle["segment_names"][cluster]
+    st.write(
+        "customer_tenure_days = reference date minus signup date."
+    )
+
+    st.write(
+        "days_since_last_purchase = reference date minus "
+        "last purchase date."
+    )
+
+    st.write(
+        "Notebook reference date:",
+        bundle["reference_date"]
+    )
+
+    st.write(
+        "This version requires these calculated day columns. "
+        "It does not convert raw signup_date or last_purchase_date columns."
+    )
+
+    st.download_button(
+        label="Download Empty CSV Template",
+        data=pd.DataFrame(columns=features).to_csv(
+            index=False
+        ).encode("utf-8"),
+        file_name="customer_input_template.csv",
+        mime="text/csv"
+    )
+
+uploaded_file = st.file_uploader(
+    "Choose a CSV file",
+    type=["csv"]
+)
+
+# No dashboard or results before uploading.
+if uploaded_file is None:
+    st.info("Upload a dataset above to begin.")
+    st.stop()
+
+try:
+    data = pd.read_csv(uploaded_file)
+except (pd.errors.EmptyDataError, pd.errors.ParserError, UnicodeDecodeError):
+    st.error("Could not read this file. Please upload a valid UTF-8 CSV.")
+    st.stop()
+
+if data.empty:
+    st.error("The uploaded dataset has no customer rows.")
+    st.stop()
+
+missing_columns = [
+    feature for feature in features
+    if feature not in data.columns
+]
+
+if missing_columns:
+    st.error(
+        "Missing required columns: "
+        + ", ".join(missing_columns)
+    )
+    st.stop()
+
+numeric_data = data[features].apply(
+    pd.to_numeric,
+    errors="coerce"
+)
+
+invalid_rows = ~np.isfinite(
+    numeric_data.to_numpy(dtype=float)
+).all(axis=1)
+
+if invalid_rows.any():
+    st.error(
+        f"{int(invalid_rows.sum())} rows contain missing or invalid "
+        "numbers in the required feature columns. "
+        "Correct these rows and upload again."
+    )
+
+    st.dataframe(data.loc[invalid_rows].head(20))
+    st.stop()
+
+try:
+    predicted_clusters = predict_segments(numeric_data)
+except ValueError as error:
+    st.error(f"Prediction failed: {error}")
+    st.stop()
+
+# Replace any existing result labels with model predictions.
+data["Cluster"] = predicted_clusters
+
+data["Customer_Segment"] = data["Cluster"].map(
+    bundle["segment_names"]
+)
+
+if data["Customer_Segment"].isna().any():
+    st.error("The saved model contains a cluster without a segment name.")
+    st.stop()
+
+st.success(
+    f"Successfully processed {len(data)} customer records."
+)
 
 
 # Dashboard
+st.subheader("Customer Dashboard")
+
 col1, col2 = st.columns(2)
 
 col1.metric("Total Customers", len(data))
 
 col2.metric(
-    "Customer Segments",
+    "Segments Found",
     data["Customer_Segment"].nunique()
 )
 
@@ -81,8 +202,8 @@ counts.index = [
 st.bar_chart(counts)
 
 
-# Prepare the customer table
-st.subheader("Customer Data")
+# Customer results
+st.subheader("Customer Results")
 
 display_data = data.copy()
 
@@ -100,8 +221,6 @@ display_data = display_data.sort_values(
     kind="stable"
 )
 
-
-# Filter customers
 selected_segment = st.selectbox(
     "Filter customers by segment",
     ["All"] + segment_order,
@@ -119,21 +238,29 @@ st.write("Customers shown:", len(filtered_data))
 st.dataframe(filtered_data)
 
 
-# Manual prediction
-st.divider()
-st.subheader("Predict Customer Segment")
+# Download filtered results
+st.subheader("Download Customer Results")
 
-st.write("Enter the customer's actual details below.")
+st.write(
+    f"Download selection: {selected_segment} "
+    f"— {len(filtered_data)} customers"
+)
+
+st.download_button(
+    label="Download Results as CSV",
+    data=filtered_data.to_csv(index=False).encode("utf-8"),
+    file_name="customer_results.csv",
+    mime="text/csv"
+)
+
+
+# Optional manual prediction
+st.divider()
+st.subheader("Predict One Customer Manually")
 
 st.caption(
     "Default values are training-data medians. "
-    "Use the same units and rate scales as your dataset."
-)
-
-st.caption(
-    "Customer tenure days = reference date minus signup date. "
-    "Days since last purchase = reference date minus last purchase date. "
-    f"Notebook reference date: {bundle['reference_date']}"
+    "Replace them with the customer's actual details."
 )
 
 values = {}
@@ -141,7 +268,7 @@ values = {}
 with st.form("prediction_form"):
     columns = st.columns(2)
 
-    for i, feature in enumerate(bundle["features"]):
+    for i, feature in enumerate(features):
         with columns[i % 2]:
             label = feature.replace("_", " ").title()
 
@@ -167,71 +294,14 @@ with st.form("prediction_form"):
 if predict:
     customer = pd.DataFrame(
         [values],
-        columns=bundle["features"]
+        columns=features
     )
 
-    segment = predict_segment(customer)
-
-    st.success(f"Customer Segment: {segment}")
-    st.write("Segment Number:", display_order[segment])
-
-
-# Test an existing customer
-st.divider()
-st.subheader("Test with an Existing Customer")
-
-test_segment = st.selectbox(
-    "Choose a segment to test",
-    segment_order,
-    key="test_segment"
-)
-
-if st.button("Test One Customer"):
-    matching = data[
-        data["Customer_Segment"] == test_segment
-    ]
-
-    if matching.empty:
-        st.warning("No customers found in this segment.")
+    if not np.isfinite(customer.to_numpy(dtype=float)).all():
+        st.error("Please enter valid finite numbers.")
     else:
-        row = matching.iloc[[0]]
+        cluster = int(predict_segments(customer)[0])
+        segment = bundle["segment_names"][cluster]
 
-        predicted_segment = predict_segment(row)
-
-        st.write(
-            "Customer ID:",
-            str(row["customer_id"].iloc[0])
-        )
-        st.write("Saved segment:", test_segment)
-        st.write("Model prediction:", predicted_segment)
-        st.write(
-            "Segment Number:",
-            display_order[predicted_segment]
-        )
-
-        if predicted_segment == test_segment:
-            st.success(
-                "The prediction matches the saved segment!"
-            )
-        else:
-            st.warning(
-                "The prediction differs from the saved segment. "
-                "We should check the model and dataset."
-            )
-
-
-# Download the filtered customer table
-st.divider()
-st.subheader("Download Customer Results")
-
-st.write(
-    f"Download selection: {selected_segment} "
-    f"— {len(filtered_data)} customers"
-)
-
-st.download_button(
-    label="Download Results as CSV",
-    data=filtered_data.to_csv(index=False).encode("utf-8"),
-    file_name="customer_results.csv",
-    mime="text/csv"
-)
+        st.success(f"Customer Segment: {segment}")
+        st.write("Segment Number:", display_order[segment])
