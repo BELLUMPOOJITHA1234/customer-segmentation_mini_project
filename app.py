@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+
 st.set_page_config(
     page_title="Customer Segmentation",
     layout="wide"
@@ -23,21 +24,37 @@ if not model_path.exists():
 bundle = joblib.load(model_path)
 features = bundle["features"]
 
+# Display numbers are separate from the original model cluster IDs.
 segment_order = [
-    "Low-Value Customers",
-    "Mid-Value Customers",
-    "High-Value Customers"
+    "Standard-Value Customers",
+    "High Lifetime-Value Customers"
 ]
 
 display_order = {
-    "Low-Value Customers": 0,
-    "Mid-Value Customers": 1,
-    "High-Value Customers": 2
+    "Standard-Value Customers": 0,
+    "High Lifetime-Value Customers": 1
 }
+
+# Check that the updated model and segment names are available.
+if bundle["model"].n_clusters != 2:
+    st.error(
+        "This model does not have two clusters. "
+        "Replace customer_model.pkl with your newly saved "
+        "two-cluster model."
+    )
+    st.stop()
+
+if set(bundle["segment_names"].values()) != set(segment_order):
+    st.error(
+        "The saved segment names do not match this website. "
+        "Save and upload the model with Standard-Value Customers "
+        "and High Lifetime-Value Customers."
+    )
+    st.stop()
 
 
 def predict_segments(customers):
-    """Apply saved preprocessing and predict clusters."""
+    """Apply saved preprocessing and predict cluster IDs."""
     prepared = customers[features].copy()
 
     for feature, (lower, upper) in bundle["bounds"].items():
@@ -87,7 +104,7 @@ with st.expander("View required columns and instructions"):
     )
 
     st.download_button(
-        "Download Empty CSV Template",
+        label="Download Empty CSV Template",
         data=pd.DataFrame(columns=features).to_csv(
             index=False
         ).encode("utf-8"),
@@ -153,8 +170,9 @@ except ValueError as error:
     st.error(f"Prediction failed: {error}")
     st.stop()
 
-# Keep uploaded_data unchanged for optional label comparison.
+# Keep the original uploaded labels for optional comparison.
 data = uploaded_data.copy()
+
 data["Cluster"] = predicted_clusters
 data["Customer_Segment"] = data["Cluster"].map(
     bundle["segment_names"]
@@ -162,17 +180,6 @@ data["Customer_Segment"] = data["Cluster"].map(
 
 if data["Customer_Segment"].isna().any():
     st.error("A model cluster has no saved segment name.")
-    st.stop()
-
-unknown_segments = (
-    set(data["Customer_Segment"]) - set(segment_order)
-)
-
-if unknown_segments:
-    st.error(
-        "Unexpected segment names in the saved model: "
-        + ", ".join(sorted(unknown_segments))
-    )
     st.stop()
 
 st.success(
@@ -245,21 +252,25 @@ if st.button("Test Selected Customer"):
     st.success(f"Customer Segment: {segment}")
     st.write("Segment Number:", display_order[segment])
 
-    # Compare only against an original uploaded label, if provided.
+    # Compare against the original uploaded label, if available.
     if "Customer_Segment" in uploaded_data.columns:
         original_segment = uploaded_data.iloc[position][
             "Customer_Segment"
         ]
 
         if pd.notna(original_segment):
-            st.write("Uploaded segment label:", str(original_segment))
+            st.write(
+                "Uploaded segment label:",
+                str(original_segment)
+            )
 
             if str(original_segment).strip() == segment:
                 st.success("Prediction matches the uploaded label.")
             else:
                 st.warning(
                     "Prediction differs from the uploaded label. "
-                    "The label may come from a different model run."
+                    "The label may come from a different model run "
+                    "or the previous three-cluster model."
                 )
 
     st.caption(
@@ -328,7 +339,7 @@ st.divider()
 
 with st.expander("Optional: Predict One Customer Manually"):
     st.caption(
-        "Default values are training-data medians. "
+        "Numeric defaults are training-data medians. "
         "Replace them with actual customer details."
     )
 
@@ -371,8 +382,14 @@ with st.expander("Optional: Predict One Customer Manually"):
         ).all():
             st.error("Please enter valid finite numbers.")
         else:
-            cluster = int(predict_segments(customer)[0])
-            segment = bundle["segment_names"][cluster]
+            try:
+                cluster = int(predict_segments(customer)[0])
+                segment = bundle["segment_names"][cluster]
 
-            st.success(f"Customer Segment: {segment}")
-            st.write("Segment Number:", display_order[segment])
+                st.success(f"Customer Segment: {segment}")
+                st.write(
+                    "Segment Number:",
+                    display_order[segment]
+                )
+            except ValueError as error:
+                st.error(f"Prediction failed: {error}")
